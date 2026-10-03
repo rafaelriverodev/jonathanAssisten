@@ -1,0 +1,34 @@
+{
+  "name": "jonathan_assistant",
+  "version": "1.0.0",
+  "description": "Asistente inteligente omnicanal Jonathan para rafaelriverodev.com",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest --watchAll"
+  },
+  "keywords": [
+    "assistant",
+    "whatsapp_bot",
+    "automation",
+    "ai_mentor"
+  ],
+  "author": "Rafael Rivero & SonTech",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^2.24.0",
+    "@google/generative-ai": "^0.24.1",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.0",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.14"
+  }
+}
