@@ -1,177 +1,93 @@
-// modulo para la gestion de sesiones, historial de conversacion y roles de usuarios con soporte nativo para JID y LID
-const fs = require('fs'); 
+// importacion del servicio de verificacion de embajadores
+const { es_embajador_registrado } = require('../../config/embajadores_config');
 
-const path = require('path'); 
+// almacenamiento en memoria principal para el historial de conversaciones y estado de sesiones
+const mapa_sesiones_usuarios = new Map();
 
-// mapa en memoria para almacenar las sesiones activas por identificador de whatsapp
-const sesiones_usuarios = new Map(); 
+// limite maximo de mensajes por historial para mantener la ventana deslizante y evitar desbordamiento de memoria
+const LIMITE_HISTORIAL_MENSAJES = 10;
 
-// limite maximo de mensajes almacenados en el historial por usuario
-const LIMITE_HISTORIAL_MENSAJES = 10; 
+// tiempo limite de inactividad de la sesion en milisegundos (24 horas)
+const TIEMPO_INACTIVIDAD_MS = 24 * 60 * 60 * 1000;
 
-// ruta absoluta hacia el archivo de configuracion de embajadores
-const ruta_archivo_embajadores = path.join(__dirname, '../../config/embajadores.json'); 
-
-
-// funcion para cargar la lista de embajadores desde el archivo json de forma segura
-function cargar_lista_embajadores() {
-  try {
-    if (!fs.existsSync(ruta_archivo_embajadores)) {
-      return [];
-    }
-
-    const contenido_raw = fs.readFileSync(ruta_archivo_embajadores, 'utf-8'); 
-
-    const datos_parseados = JSON.parse(contenido_raw); 
-
-    if (datos_parseados && Array.isArray(datos_parseados.embajadores)) {
-      return datos_parseados.embajadores;
-    }
-
-    return [];
-  } catch (error_lectura) {
-    console.error('Error al leer el archivo config/embajadores.json:', error_lectura.message); 
-    return [];
-  }
-} 
-
-
-// funcion para extraer unicamente los digitos numericos de cualquier cadena
-function extraer_solo_numeros(identificador) {
-  if (!identificador || typeof identificador !== 'string') {
-    return '';
+// funcion para obtener o inicializar la sesion de un usuario por su identificador jid
+function obtener_sesion_usuario(identificador_jid) {
+  if (!identificador_jid || typeof identificador_jid !== 'string') {
+    throw new Error('[SonTech Error] Identificador JID invalido para obtener la sesion.');
   }
 
-  // tomar la parte previa al arroba y remover cualquier caracter que no sea numero
-  const parte_usuario = identificador.split('@')[0]; 
+  // determinacion dinamica del rol actual consultando la lista actualizada de embajadores
+  const es_embajador_actual = es_embajador_registrado(identificador_jid);
+  const rol_calculado = es_embajador_actual ? 'EMBAJADOR' : 'CLIENTE';
 
-  return parte_usuario.replace(/\D/g, ''); 
-} 
+  let sesion_existente = mapa_sesiones_usuarios.get(identificador_jid);
 
-
-// funcion para determinar el rol del usuario evaluando tanto el identificador directo como posibles alternativas
-function obtener_rol_usuario(identificador_usuario, identificador_alternativo = null) {
-  const numeros_primarios = extraer_solo_numeros(identificador_usuario); 
-  const numeros_secundarios = extraer_solo_numeros(identificador_alternativo); 
-
-  if (!numeros_primarios && !numeros_secundarios) {
-    return 'cliente';
-  }
-
-  // obtener la lista actualizada de embajadores desde el archivo json
-  const lista_embajadores_raw = cargar_lista_embajadores(); 
-
-  // extraer solo los digitos numericos de la lista configurada
-  const lista_numeros_embajadores = lista_embajadores_raw.map(id => extraer_solo_numeros(id)); 
-
-  // comprobar si el identificador primario o el secundario coinciden con la lista de embajadores
-  const coincide_primario = lista_numeros_embajadores.includes(numeros_primarios); 
-  const coincide_secundario = lista_numeros_embajadores.includes(numeros_secundarios); 
-
-  if (coincide_primario || coincide_secundario) {
-    return 'embajador';
-  }
-
-  return 'cliente';
-} 
-
-
-// funcion para obtener o inicializar la sesion de un usuario
-function obtener_sesion_usuario(identificador_usuario, identificador_alternativo = null) {
-  if (!sesiones_usuarios.has(identificador_usuario)) {
-    const rol_detectado = obtener_rol_usuario(identificador_usuario, identificador_alternativo); 
-
-    sesiones_usuarios.set(identificador_usuario, {
-      rol: rol_detectado,
+  if (!sesion_existente) {
+    // creacion de una nueva estructura de sesion si no existe previa
+    sesion_existente = {
+      jid_usuario: identificador_jid,
+      rol: rol_calculado,
       historial: [],
       ultima_interaccion: Date.now()
-    }); 
+    };
+
+    mapa_sesiones_usuarios.set(identificador_jid, sesion_existente);
+  } else {
+    // actualizacion del rol en memoria por si el usuario fue registrado recientemente como embajador
+    sesion_existente.rol = rol_calculado;
+    sesion_existente.ultima_interaccion = Date.now();
   }
 
-  const sesion = sesiones_usuarios.get(identificador_usuario); 
+  return sesion_existente;
+}
 
-  // reevaluar el rol en cada interaccion por si cambio el archivo json o la identidad
-  sesion.rol = obtener_rol_usuario(identificador_usuario, identificador_alternativo); 
-  sesion.ultima_interaccion = Date.now(); 
+// funcion para guardar un nuevo mensaje en el historial respetando el limite maximo
+function guardar_mensaje_historial(identificador_jid, emisor_rol, contenido_texto) {
+  if (!contenido_texto || typeof contenido_texto !== 'string') {
+    return;
+  }
 
-  return sesion;
-} 
+  const sesion_usuario = obtener_sesion_usuario(identificador_jid);
 
-
-// === DESDE AQUÍ PEGA LA SIGUIENTE PARTE DEL CÓDIGO ===
-// funcion para agregar un nuevo mensaje al historial respetando el limite maximo
-function guardar_mensaje_historial(identificador_usuario, rol_remitente, texto_mensaje) {
-  const sesion_actual = obtener_sesion_usuario(identificador_usuario); 
-
-  // estructura del mensaje para el historial compatible con el formato del modelo de ia
+  // construccion del objeto de mensaje para el contexto de la ia
   const nuevo_mensaje = {
-    role: rol_remitente === 'bot' ? 'model' : 'user',
-    parts: [{ text: texto_mensaje }]
-  }; 
-
-  sesion_actual.historial.push(nuevo_mensaje); 
-
-  // aplicar ventana deslizante para no superar el limite de mensajes en memoria
-  if (sesion_actual.historial.length > LIMITE_HISTORIAL_MENSAJES) {
-    sesion_actual.historial = sesion_actual.historial.slice(-LIMITE_HISTORIAL_MENSAJES); 
-  }
-} 
-
-
-// funcion para construir las instrucciones de sistema dinamicas segun el rol del usuario
-function obtener_prompt_por_rol(rol_usuario) {
-  if (rol_usuario === 'embajador') {
-    return `
-Eres Jonathan, mentor de IA de rafaelriverodev.com. Te estas dirigiendo a un EMBAJADOR O VENDEDOR de la marca.
-Tu objetivo principal con los embajadores es:
-1. Darles consejos tacticos de ventas, manejo de objeciones y cierres efectivos para Landing Pages.
-2. Recordarles la estructura de comisiones (10% de 1 a 4 ventas/semana = 40€; 20% con 5+ ventas = 80€; 10% pasivo recurrente por mantenimiento).
-3. Motivarlos, guiarlos con profesionalismo y resolver cualquier duda tecnica sobre nuestros servicios.
-4. Hablarles como a un aliado estrategico de negocios.
-`;
-  }
-
-  // prompt por defecto enfocado a clientes finales
-  return `
-Eres Jonathan, asesor comercial de IA de rafaelriverodev.com. Te estas dirigiendo a un CLIENTE POTENCIAL.
-Tu objetivo principal con los clientes es:
-1. Resolver sus dudas sobre desarrollo web, Landing Pages y presencia digital.
-2. Explicar los beneficios de la oferta "Llave en Mano" (400€ pago unico, dominio gratis 1er año, mantenimiento 29€/mes desde 2º mes y branding sin coste si no tienen logo).
-3. Transmitir confianza, cercania y guiarlos a cerrar la contratacion del servicio de forma natural y sin presion.
-`;
-} 
-
-
-// funcion para obtener el contexto completo listo para enviar a la ia
-function obtener_contexto_para_ia(identificador_usuario, identificador_alternativo = null) {
-  const sesion_actual = obtener_sesion_usuario(identificador_usuario, identificador_alternativo); 
-  const prompt_sistema_dinamico = obtener_prompt_por_rol(sesion_actual.rol); 
-
-  return {
-    rol: sesion_actual.rol,
-    prompt_sistema: prompt_sistema_dinamico,
-    historial: sesion_actual.historial
+    role: emisor_rol === 'user' ? 'user' : 'model',
+    parts: [{ text: contenido_texto.trim() }],
+    timestamp: Date.now()
   };
-} 
 
+  sesion_usuario.historial.push(nuevo_mensaje);
 
-// funcion utilitaria para limpiar sesiones inactivas tras un periodo determinado (prevencion DoS)
-function limpiar_sesiones_inactivas(tiempo_inactividad_ms = 1800000) {
-  const ahora = Date.now(); 
+  // mantenimiento de la ventana deslizante eliminando los mensajes mas antiguos si supera el limite
+  if (sesion_usuario.historial.length > LIMITE_HISTORIAL_MENSAJES) {
+    sesion_usuario.historial.shift();
+  }
 
-  for (const [identificador, sesion] of sesiones_usuarios.entries()) {
-    if (ahora - sesion.ultima_interaccion > tiempo_inactividad_ms) {
-      sesiones_usuarios.delete(identificador); 
+  sesion_usuario.ultima_interaccion = Date.now();
+}
+
+// funcion de mantenimiento para limpiar sesiones inactivas de la memoria principal
+function limpiar_sesiones_inactivas() {
+  const tiempo_actual = Date.now();
+  let contador_sesiones_eliminadas = 0;
+
+  for (const [jid_clave, sesion_datos] of mapa_sesiones_usuarios.entries()) {
+    const tiempo_transcurrido = tiempo_actual - sesion_datos.ultima_interaccion;
+
+    if (tiempo_transcurrido > TIEMPO_INACTIVIDAD_MS) {
+      mapa_sesiones_usuarios.delete(jid_clave);
+      contador_sesiones_eliminadas++;
     }
   }
-} 
 
+  if (contador_sesiones_eliminadas > 0) {
+    console.log(`[SonTech Maintenance] Se han purgado ${contador_sesiones_eliminadas} sesiones inactivas de la memoria.`);
+  }
+}
 
-// exportacion de funciones del gestor de historial y sesiones
+// exportacion modular explicita de las funciones del servicio de historial
 module.exports = {
-  obtener_rol_usuario,
   obtener_sesion_usuario,
   guardar_mensaje_historial,
-  obtener_contexto_para_ia,
   limpiar_sesiones_inactivas
 };

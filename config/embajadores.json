@@ -1,6 +1,10 @@
 {
   "embajadores": [
-    "34624865532",
-    "34640895563"
+    {
+      "nombre": "Rafael J Rivero",
+      "telefono": "34624865532",
+      "lid": "88399117562053",
+      "activo": true
+    }
   ]
 }
