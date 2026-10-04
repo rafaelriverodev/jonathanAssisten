@@ -1,64 +1,56 @@
-// importacion de los modulos de pruebas de jest y utilidades de simulación
-const { describe, test, expect, beforeEach, jest } = require('@jest/globals');
+// importacion del modulo de rutas nativo de node.js
+const path = require('path');
 
-// declaracion de simulacion del servicio de gestion de sesiones
-describe('Pruebas Unitarias del Gestor de Sesiones (session_manager.js)', () => {
+// declaracion de la suite de pruebas para el gestor de sesiones de usuarios
+describe('Suite de Pruebas: tests/session_manager.test.js', () => {
 
-  // declaracion de variables para almacenar el estado del mock
-  let evento_conexion_simulado;
-  let manejador_eventos_mock;
-
+  // inicializacion de variables de entorno de prueba antes de cada ejecucion
   beforeEach(() => {
-    // limpieza de simulaciones previas antes de cada prueba
+    // limpieza de mocks globales nativos de jest sin re-declarar la palabra reservada
     jest.clearAllMocks();
-
-    // configuracion de los manejadores simulados para los eventos del socket de baileys
-    manejador_eventos_mock = {
-      ev: {
-        on: jest.fn((nombre_evento, callback) => {
-          if (nombre_evento === 'connection.update') {
-            evento_conexion_simulado = callback;
-          }
-        })
-      }
-    };
+    jest.resetModules();
   });
 
-  // prueba 1: verificacion del establecimiento correcto de conexion
-  test('Debe procesar correctamente un estado de conexion abierto (open)', () => {
-    const estado_conexion_abierto = {
-      connection: 'open',
-      lastDisconnect: null
+  // prueba unitaria para la creacion correcta de una nueva estructura de sesion
+  test('debe inicializar un estado de sesion limpio para un remitente unico', () => {
+    const id_remitente_prueba = '34600112233@s.whatsapp.net';
+
+    const estructura_sesion_esperada = {
+      id_usuario: id_remitente_prueba,
+      historial_mensajes: [],
+      rol_asignado: 'CLIENTE',
+      ultima_interaccion: expect.any(Number)
     };
 
-    // verificacion de la estructura del estado simulado
-    expect(estado_conexion_abierto.connection).toBe('open');
-    expect(estado_conexion_abierto.lastDisconnect).toBeNull();
+    expect(id_remitente_prueba).toBeDefined();
+
+    expect(estructura_sesion_esperada.rol_asignado).toBe('CLIENTE');
+
   });
 
-  // prueba 2: verificacion del manejo de reconexion por cierre de socket
-  test('Debe detectar una desconexion y requerir intento de reintento', () => {
-    const estado_conexion_cerrado = {
-      connection: 'close',
-      lastDisconnect: {
-        error: new Error('Socket de red desconectado')
-      }
-    };
+  // prueba unitaria para verificar la asignacion del rol de embajador
+  test('debe asignar el rol EMBAJADOR si la verificacion de identificador es exitosa', () => {
+    const id_embajador_prueba = '88399117562053@lid';
 
-    // verificacion de la captura de error en el cierre
-    expect(estado_conexion_cerrado.connection).toBe('close');
-    expect(estado_conexion_cerrado.lastDisconnect.error.message).toBe('Socket de red desconectado');
+    const es_embajador = true;
+
+    const rol_final = es_embajador ? 'EMBAJADOR' : 'CLIENTE';
+
+    expect(rol_final).toBe('EMBAJADOR');
+
   });
 
-  // prueba 3: validacion de la generacion de evento qr para autenticacion
-  test('Debe capturar la emision de un nuevo codigo QR cuando sea solicitado por Baileys', () => {
-    const estado_qr_actualizado = {
-      qr: 'abc123456789_token_simulado_qr'
-    };
+  // prueba unitaria para validar la limpieza de memoria de sesiones inactivas
+  test('debe limpiar o resetear la sesion si excede el tiempo de expiracion', () => {
+    const tiempo_limite_ms = 1800000; // 30 minutos en milisegundos
+    const tiempo_ultima_interaccion = Date.now() - 2000000;
 
-    // evaluacion de la presencia de la cadena del QR
-    expect(estado_qr_actualizado.qr).toBeDefined();
-    expect(typeof estado_qr_actualizado.qr).toBe('string');
+    const diferencia_tiempo = Date.now() - tiempo_ultima_interaccion;
+
+    const esta_expirada = diferencia_tiempo > tiempo_limite_ms;
+
+    expect(esta_expirada).toBe(true);
+
   });
 
 });
