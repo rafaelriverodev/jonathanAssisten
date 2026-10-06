@@ -1,93 +1,100 @@
-// importacion del servicio de verificacion de embajadores
-const { es_embajador_registrado } = require('../../config/embajadores_config');
+// importacion de modulos nativos de nodejs para el manejo del sistema de archivos y rutas
+const fs = require('fs');
+const path = require('path');
 
-// almacenamiento en memoria principal para el historial de conversaciones y estado de sesiones
-const mapa_sesiones_usuarios = new Map();
+// definicion de la ruta absoluta para el directorio de almacenamiento de sesiones
+const directorio_sesiones = path.join(__dirname, '../../data/sessions');
 
-// limite maximo de mensajes por historial para mantener la ventana deslizante y evitar desbordamiento de memoria
-const LIMITE_HISTORIAL_MENSAJES = 10;
+// funcion auxiliar para garantizar la existencia del directorio de almacenamiento
+const asegurar_directorio_sesiones = () => {
+  if (!fs.existsSync(directorio_sesiones)) {
+    fs.mkdirSync(directorio_sesiones, { recursive: true });
+  }
+};
 
-// tiempo limite de inactividad de la sesion en milisegundos (24 horas)
-const TIEMPO_INACTIVIDAD_MS = 24 * 60 * 60 * 1000;
-
-// funcion para obtener o inicializar la sesion de un usuario por su identificador jid
-function obtener_sesion_usuario(identificador_jid) {
-  if (!identificador_jid || typeof identificador_jid !== 'string') {
-    throw new Error('[SonTech Error] Identificador JID invalido para obtener la sesion.');
+// funcion para sanitizar el identificador de usuario y prevenir inyección de rutas (OWASP A03:2026)
+const sanitizar_identificador_usuario = (id_usuario) => {
+  if (typeof id_usuario !== 'string') {
+    return 'usuario_desconocido';
   }
 
-  // determinacion dinamica del rol actual consultando la lista actualizada de embajadores
-  const es_embajador_actual = es_embajador_registrado(identificador_jid);
-  const rol_calculado = es_embajador_actual ? 'EMBAJADOR' : 'CLIENTE';
+  // remueve caracteres peligrosos como puntos consecutivos, barras de directorio y caracteres no alfanumericos
+  return id_usuario.replace(/[^a-zA-Z0-9_-]/g, '_');
+};
 
-  let sesion_existente = mapa_sesiones_usuarios.get(identificador_jid);
+// funcion para obtener la ruta completa del archivo JSON de sesion de un usuario
+const obtener_ruta_archivo_sesion = (id_usuario) => {
+  const id_sanitizado = sanitizar_identificador_usuario(id_usuario);
+  return path.join(directorio_sesiones, `${id_sanitizado}.json`);
+};
 
-  if (!sesion_existente) {
-    // creacion de una nueva estructura de sesion si no existe previa
-    sesion_existente = {
-      jid_usuario: identificador_jid,
-      rol: rol_calculado,
+// funcion para cargar el historial de sesion guardado de un usuario
+const cargar_historial_sesion = (id_usuario) => {
+  try {
+    asegurar_directorio_sesiones();
+    const ruta_archivo = obtener_ruta_archivo_sesion(id_usuario);
+
+    if (!fs.existsSync(ruta_archivo)) {
+      return {
+        historial: [],
+        rol: 'CLIENTE',
+        ultima_actualizacion: null
+      };
+    }
+
+    const contenido_archivo = fs.readFileSync(ruta_archivo, 'utf8');
+    return JSON.parse(contenido_archivo);
+  } catch (error_carga) {
+    console.error(`[SonTech Error] Fallo al cargar sesion de ${id_usuario}:`, error_carga.message);
+    return {
       historial: [],
-      ultima_interaccion: Date.now()
+      rol: 'CLIENTE',
+      ultima_actualizacion: null
+    };
+  }
+};
+
+// funcion para guardar o actualizar el historial de sesion de un usuario en disco
+const guardar_historial_sesion = (id_usuario, historial_mensajes, rol_usuario = 'CLIENTE') => {
+  try {
+    asegurar_directorio_sesiones();
+    const ruta_archivo = obtener_ruta_archivo_sesion(id_usuario);
+
+    const datos_sesion = {
+      id_usuario: sanitizar_identificador_usuario(id_usuario),
+      rol: rol_usuario,
+      historial: Array.isArray(historial_mensajes) ? historial_mensajes : [],
+      ultima_actualizacion: new Date().toISOString()
     };
 
-    mapa_sesiones_usuarios.set(identificador_jid, sesion_existente);
-  } else {
-    // actualizacion del rol en memoria por si el usuario fue registrado recientemente como embajador
-    sesion_existente.rol = rol_calculado;
-    sesion_existente.ultima_interaccion = Date.now();
+    fs.writeFileSync(ruta_archivo, JSON.stringify(datos_sesion, null, 2), 'utf8');
+    return true;
+  } catch (error_guardado) {
+    console.error(`[SonTech Error] Fallo al guardar sesion de ${id_usuario}:`, error_guardado.message);
+    return false;
   }
+};
 
-  return sesion_existente;
-}
+// funcion para eliminar de forma segura el historial de sesion de disco
+const limpiar_historial_sesion = (id_usuario) => {
+  try {
+    const ruta_archivo = obtener_ruta_archivo_sesion(id_usuario);
 
-// funcion para guardar un nuevo mensaje en el historial respetando el limite maximo
-function guardar_mensaje_historial(identificador_jid, emisor_rol, contenido_texto) {
-  if (!contenido_texto || typeof contenido_texto !== 'string') {
-    return;
-  }
-
-  const sesion_usuario = obtener_sesion_usuario(identificador_jid);
-
-  // construccion del objeto de mensaje para el contexto de la ia
-  const nuevo_mensaje = {
-    role: emisor_rol === 'user' ? 'user' : 'model',
-    parts: [{ text: contenido_texto.trim() }],
-    timestamp: Date.now()
-  };
-
-  sesion_usuario.historial.push(nuevo_mensaje);
-
-  // mantenimiento de la ventana deslizante eliminando los mensajes mas antiguos si supera el limite
-  if (sesion_usuario.historial.length > LIMITE_HISTORIAL_MENSAJES) {
-    sesion_usuario.historial.shift();
-  }
-
-  sesion_usuario.ultima_interaccion = Date.now();
-}
-
-// funcion de mantenimiento para limpiar sesiones inactivas de la memoria principal
-function limpiar_sesiones_inactivas() {
-  const tiempo_actual = Date.now();
-  let contador_sesiones_eliminadas = 0;
-
-  for (const [jid_clave, sesion_datos] of mapa_sesiones_usuarios.entries()) {
-    const tiempo_transcurrido = tiempo_actual - sesion_datos.ultima_interaccion;
-
-    if (tiempo_transcurrido > TIEMPO_INACTIVIDAD_MS) {
-      mapa_sesiones_usuarios.delete(jid_clave);
-      contador_sesiones_eliminadas++;
+    if (fs.existsSync(ruta_archivo)) {
+      fs.unlinkSync(ruta_archivo);
     }
+    return true;
+  } catch (error_limpieza) {
+    console.error(`[SonTech Error] Fallo al eliminar sesion de ${id_usuario}:`, error_limpieza.message);
+    return false;
   }
+};
 
-  if (contador_sesiones_eliminadas > 0) {
-    console.log(`[SonTech Maintenance] Se han purgado ${contador_sesiones_eliminadas} sesiones inactivas de la memoria.`);
-  }
-}
-
-// exportacion modular explicita de las funciones del servicio de historial
+// exportacion modular explicita con la convencion snake_case
 module.exports = {
-  obtener_sesion_usuario,
-  guardar_mensaje_historial,
-  limpiar_sesiones_inactivas
+  sanitizar_identificador_usuario,
+  obtener_ruta_archivo_sesion,
+  cargar_historial_sesion,
+  guardar_historial_sesion,
+  limpiar_historial_sesion
 };

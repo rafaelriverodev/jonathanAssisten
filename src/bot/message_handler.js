@@ -1,77 +1,108 @@
-// importacion del gestor de sesiones para control de contexto y caducidad
-const { 
-  obtener_o_crear_sesion, 
-  registrar_mensaje_en_historial, 
-  debe_presentarse_usuario 
-} = require('../services/session_manager'); 
+// importacion del gestor de sesiones y estado de usuario
+const { obtener_o_crear_sesion, actualizar_historial_sesion } = require('../services/session_manager');
 
-// importacion de la configuracion desde la raiz config/embajadores_config.js
-const { obtener_rol_usuario } = require('../../config/embajadores_config'); 
+// importacion del servicio de inteligencia artificial del mentor jonathan
+const { generar_respuesta_jonathan } = require('../services/ai_mentor_service');
 
-// importacion del servicio principal de inteligencia artificial de jonathan
-const { generar_respuesta_jonathan } = require('../services/ai_mentor_service'); 
+// importacion de la configuracion y verificacion de embajadores
+const { es_embajador_registrado } = require('../../config/embajadores_config');
 
+// funcion auxiliar para sanitizar el texto entrante del mensaje de whatsapp (OWASP A03:2026)
+const sanitizar_texto_mensaje = (texto_bruto) => {
+  if (typeof texto_bruto !== 'string') {
+    return '';
+  }
 
-// funcion principal para escuchar y procesar los mensajes entrantes de whatsapp
-function registrar_manejador_mensajes(instancia_socket_whatsapp) {
-  instancia_socket_whatsapp.ev.on('messages.upsert', async (evento_mensaje) => {
+  // eliminacion de caracteres nulos y recorte de espacios en blanco extremos
+  return texto_bruto.replace(/\0/g, '').trim();
+};
+
+// funcion principal para procesar los mensajes entrantes de whatsapp
+async function procesar_mensaje_entrante(cliente_socket, evento_mensaje) {
+  try {
+    // ignorar mensajes enviados por el propio bot para evitar bucles infinitos
+    if (!evento_mensaje.messages || evento_mensaje.messages.length === 0) {
+      return;
+    }
+
+    const mensaje_actual = evento_mensaje.messages[0];
+
+    if (mensaje_actual.key.fromMe) {
+      return;
+    }
+
+    // extraccion del identificador del remitente (numero o lid de whatsapp)
+    const id_remitente = mensaje_actual.key.remoteJid;
+
+    if (!id_remitente) {
+      return;
+    }
+
+    // extraccion y sanitizacion del contenido de texto del mensaje
+    const texto_mensaje_bruto = mensaje_actual.message?.conversation ||
+                               mensaje_actual.message?.extendedTextMessage?.text ||
+                               '';
+
+    const texto_mensaje_limpio = sanitizar_texto_mensaje(texto_mensaje_bruto);
+
+    if (!texto_mensaje_limpio) {
+      return;
+    }
+
+    // verificacion de control de acceso y asignacion de rol (OWASP A01:2026)
+    const es_embajador = es_embajador_registrado(id_remitente);
+    const rol_usuario = es_embajador ? 'EMBAJADOR' : 'CLIENTE';
+
+    // obtencion o creacion del estado de la sesion del usuario
+    const sesion_usuario = obtener_o_crear_sesion(id_remitente, rol_usuario);
+
+    console.log(`[SonTech Audit] Mensaje recibido de: ${id_remitente} | Rol: ${rol_usuario} | Primer Contacto: ${sesion_usuario.es_primer_contacto}`);
+
+    // === DESDE AQUÍ PEGA LA SIGUIENTE PARTE DEL CÓDIGO ===
+    // generacion de respuesta utilizando el servicio de inteligencia artificial
+    const respuesta_jonathan = await generar_respuesta_jonathan(
+      rol_usuario,
+      sesion_usuario.es_primer_contacto,
+      sesion_usuario.historial,
+      texto_mensaje_limpio
+    );
+
+    // actualizacion del historial de sesion con los nuevos mensajes
+    const nuevo_historial = [
+      ...sesion_usuario.historial,
+      { rol: 'user', texto: texto_mensaje_limpio },
+      { rol: 'model', texto: respuesta_jonathan }
+    ];
+
+    actualizar_historial_sesion(id_remitente, nuevo_historial, rol_usuario);
+
+    // envio de la respuesta generada al usuario a traves de whatsapp
+    await cliente_socket.sendMessage(id_remitente, {
+      text: respuesta_jonathan
+    });
+
+    console.log(`[SonTech Audit] Respuesta enviada exitosamente a: ${id_remitente}`);
+
+  } catch (error_procesamiento) {
+    console.error('[SonTech Error] Fallo critico procesando el mensaje entrante:', error_procesamiento.message);
+
+    // respuesta de contingencia en caso de fallo inesperado para evitar silencio de cara al usuario
     try {
-      const mensaje_recibido = evento_mensaje.messages[0]; 
+      const id_remitente = evento_mensaje?.messages?.[0]?.key?.remoteJid;
 
-      // ignorar mensajes enviados por el propio bot o mensajes del sistema
-      if (!mensaje_recibido || mensaje_recibido.key.fromMe) {
-        return; 
-      } 
+      if (id_remitente) {
+        await cliente_socket.sendMessage(id_remitente, {
+          text: 'Hola. En este momento estoy procesando una consulta. Por favor, intentalo de nuevo en unos momentos.'
+        });
+      }
+    } catch (error_envio_fallback) {
+      console.error('[SonTech Error] No se pudo enviar el mensaje de fallback:', error_envio_fallback.message);
+    }
+  }
+}
 
-      // identificador del remitente (numero de telefono)
-      const numero_remitente_bruto = mensaje_recibido.key.remoteJid; 
-
-      // extraccion del contenido de texto plano del mensaje
-      const texto_mensaje_usuario = mensaje_recibido.message?.conversation || 
-                                    mensaje_recibido.message?.extendedTextMessage?.text || 
-                                    ''; 
-
-      if (!texto_mensaje_usuario.trim()) {
-        return; 
-      } 
-
-      console.log(`[SonTech Bot Log] Mensaje recibido de ${numero_remitente_bruto}: "${texto_mensaje_usuario}"`); 
-
-      // 1. identificacion dinamica de rol (EMBAJADOR o CLIENTE_POTENCIAL)
-      const rol_usuario = obtener_rol_usuario(numero_remitente_bruto); 
-
-      // 2. gestion de estado de sesion y control de presentaciones repetitivas
-      const sesion_usuario = obtener_o_crear_sesion(numero_remitente_bruto); 
-      const es_primer_contacto = debe_presentarse_usuario(numero_remitente_bruto); 
-
-      // 3. generacion de la respuesta usando el servicio de inteligencia artificial
-      const respuesta_generada_jonathan = await generar_respuesta_jonathan(
-        rol_usuario,
-        es_primer_contacto,
-        sesion_usuario.historial_mensajes,
-        texto_mensaje_usuario
-      ); 
-
-      // 4. registro de la interaccion en la memoria de la sesion
-      registrar_mensaje_en_historial(numero_remitente_bruto, 'user', texto_mensaje_usuario); 
-      registrar_mensaje_en_historial(numero_remitente_bruto, 'bot', respuesta_generada_jonathan); 
-
-      // 5. envio de la respuesta generada al cliente por whatsapp
-      await instancia_socket_whatsapp.sendMessage(numero_remitente_bruto, {
-        text: respuesta_generada_jonathan
-      }); 
-
-      console.log(`[SonTech Bot Log] Respuesta enviada con exito a ${numero_remitente_bruto}`); 
-
-    } catch (error_manejador) {
-      console.error('[SonTech Security Error] Error al procesar el mensaje entrante:', error_manejador.message); 
-    } 
-  }); 
-} 
-
-
-// exportacion modular de la funcion con alias para evitar discrepancias de importacion
+// exportacion modular explicita del manejador de mensajes
 module.exports = {
-  registrar_manejador_mensajes,
-  registrar_eventos_bot: registrar_manejador_mensajes
+  sanitizar_texto_mensaje,
+  procesar_mensaje_entrante
 };
